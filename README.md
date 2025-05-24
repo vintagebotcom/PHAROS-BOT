@@ -6,6 +6,11 @@ npm install ethers https-proxy-agent random-useragent pm2
 
 ```
 
+# CLONE
+
+```bash
+git clone https://github.com/vintagebotcom/PHAROS-BOT.git && cd PHAROS-BOT
+
 # RUN USING BELOW COMMAND 
 ```bash
 pm2 start pharos_bot_with_resume.js --watch
