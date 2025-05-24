@@ -1,5 +1,15 @@
 # Pharos Testnet Auto Bot
 
+# INSTALL 
+```bash
+npm install ethers https-proxy-agent random-useragent axios
+```
+
+# RUN USING BELOW COMMAND 
+```bash
+pm2 start pharos_bot_with_resume.js --watch
+```
+
 An automated bot for interacting with the Pharos Testnet, performing swaps, transfers, faucet claims, and daily check-ins to potentially qualify for airdrops.
 
 ## Features ✨
