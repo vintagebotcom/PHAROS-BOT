@@ -110,16 +110,16 @@ const positionManagerAbi = [
   },
 ];
 const pairOptions = [
-  { id: 1, from: 'WPHRS', to: 'USDC', amount: 0.01 },
-  { id: 2, from: 'WPHRS', to: 'USDT', amount: 0.01 },
+  { id: 1, from: 'WPHRS', to: 'USDC', amount: 0.00001 },
+  { id: 2, from: 'WPHRS', to: 'USDT', amount: 0.0001 },
   { id: 3, from: 'USDC', to: 'WPHRS', amount: 0.01 },
   { id: 4, from: 'USDT', to: 'WPHRS', amount: 0.01 },
   { id: 5, from: 'USDC', to: 'USDT', amount: 0.01 },
   { id: 6, from: 'USDT', to: 'USDC', amount: 0.01 },
 ];
 const lpOptions = [
-  { id: 1, token0: 'WPHRS', token1: 'USDC', amount0: 0.01, amount1: 0.01, fee: 3000 },
-  { id: 2, token0: 'WPHRS', token1: 'USDT', amount0: 0.01, amount1: 0.01, fee: 3000 },
+  { id: 1, token0: 'WPHRS', token1: 'USDC', amount0: 0.0001, amount1: 0.01, fee: 3000 },
+  { id: 2, token0: 'WPHRS', token1: 'USDT', amount0: 0.0001, amount1: 0.01, fee: 3000 },
 ];
 
 // ---- Helpers ----
@@ -373,8 +373,8 @@ const transferPHRS = async (wallet, provider, index) => {
 };
 const wrapPHRS = async (wallet, provider, index) => {
   try {
-    const minAmount = 0.000001;
-    const maxAmount = 0.00001;
+    const minAmount = 0.0001;
+    const maxAmount = 0.0006;
     const amount = minAmount + Math.random() * (maxAmount - minAmount);
     const amountWei = ethers.parseEther(amount.toFixed(6).toString());
     logger.step(`Preparing wrap PHRS ${index + 1}: ${amount.toFixed(6)} PHRS to WPHRS`);
@@ -669,10 +669,10 @@ function saveProgress(progress) {
 }
 
 // ---- Main Loop ----
-const numTransfers = 20;
-const numWraps = 20;
-const numSwaps = 20;
-const numLPs = 20;
+const numTransfers = 10;
+const numWraps = 10;
+const numSwaps = 10;
+const numLPs = 10;
 const sleep = ms => new Promise(res => setTimeout(res, ms));
 const getNowUTC = () => Math.floor(Date.now() / 1000);
 const WAIT_LOG_INTERVAL = 60 * 10;
