@@ -2,7 +2,8 @@
 
 # INSTALL 
 ```bash
-npm install ethers https-proxy-agent random-useragent axios
+npm install ethers https-proxy-agent random-useragent pm2
+
 ```
 
 # RUN USING BELOW COMMAND 
