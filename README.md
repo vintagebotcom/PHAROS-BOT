@@ -3,7 +3,13 @@
 # INSTALL 
 ```bash
 npm install ethers https-proxy-agent random-useragent pm2
-
+```
+```bash
+sudo apt update
+sudo apt install nodejs npm -y
+```
+```bash
+sudo npm install -g pm2
 ```
 
 # CLONE
