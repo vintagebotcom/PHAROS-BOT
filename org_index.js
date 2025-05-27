@@ -47,18 +47,13 @@ const tokens = {
   POSITION_MANAGER: '0xF8a1D4FF0f9b9Af7CE58E1fc1833688F3BFd6115',
 };
 
-const poolAddresses = {
-  USDC_WPHRS: '0x0373a059321219745aee4fad8a942cf088be3d0e',
-  USDT_WPHRS: '0x70118b6eec45329e0534d849bc3e588bb6752527',
-};
-
-const contractAddress = '0x1a4de519154ae51200b0ad7c90f7fac75547888a';
-
 const tokenDecimals = {
   WPHRS: 18,
   USDC: 6,
   USDT: 6,
 };
+
+const contractAddress = '0x1a4de519154ae51200b0ad7c90f7fac75547888a';
 
 const contractAbi = [
   {
@@ -130,6 +125,56 @@ const lpOptions = [
   { id: 2, token0: 'WPHRS', token1: 'USDT', amount0: 0.001, amount1: 0.001, fee: 3000 },
 ];
 
+const PROGRESS_FILE = 'progress.json';
+const WAIT_LOG_INTERVAL = 60 * 10;
+
+const numTransfers = 10;
+const numWraps = 10;
+const numSwaps = 10;
+const numLPs = 10;
+
+const sleep = ms => new Promise(res => setTimeout(res, ms));
+
+// Shuffle function to randomize wallet order each round
+function shuffleArray(arr) {
+  let a = arr.slice();
+  for (let i = a.length - 1; i > 0; i--) {
+    let j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
+
+// Helper: display ms as human-readable time
+function msToTime(ms) {
+  if (ms <= 0) return "now";
+  let seconds = Math.floor(ms / 1000);
+  let h = Math.floor(seconds / 3600);
+  let m = Math.floor((seconds % 3600) / 60);
+  let s = seconds % 60;
+  return `${h}h ${m}m ${s}s`;
+}
+
+const saveProgress = (progress) => {
+  try {
+    fs.writeFileSync(PROGRESS_FILE, JSON.stringify(progress, null, 2));
+  } catch (err) {
+    logger.warn('Could not save progress file: ' + err.message);
+  }
+};
+
+const loadProgress = () => {
+  try {
+    if (fs.existsSync(PROGRESS_FILE)) {
+      return JSON.parse(fs.readFileSync(PROGRESS_FILE, 'utf8'));
+    }
+    return {};
+  } catch (err) {
+    logger.warn('Could not read progress file: ' + err.message);
+    return {};
+  }
+};
+
 const loadProxies = () => {
   try {
     const proxies = fs.readFileSync('proxies.txt', 'utf8')
@@ -167,6 +212,57 @@ const setupProvider = (proxy = null) => {
   }
 };
 
+// --- Check-in status helper (returns [eligible, next_timestamp, jwt]) ---
+async function checkinStatus(wallet, proxy = null) {
+  try {
+    const message = "pharos";
+    const signature = await wallet.signMessage(message);
+    const loginUrl = `https://api.pharosnetwork.xyz/user/login?address=${wallet.address}&signature=${signature}&invite_code=S6NGMzXSCDBxhnwo`;
+    const headers = {
+      accept: "application/json, text/plain, */*",
+      "accept-language": "en-US,en;q=0.8",
+      authorization: "Bearer null",
+      "sec-ch-ua": '"Chromium";v="136", "Brave";v="136", "Not.A/Brand";v="99"',
+      "sec-ch-ua-mobile": "?0",
+      "sec-ch-ua-platform": '"Windows"',
+      "sec-fetch-dest": "empty",
+      "sec-fetch-mode": "cors",
+      "sec-fetch-site": "same-site",
+      "sec-gpc": "1",
+      Referer: "https://testnet.pharosnetwork.xyz/",
+      "Referrer-Policy": "strict-origin-when-cross-origin",
+      "User-Agent": randomUseragent.getRandom(),
+    };
+    const axiosConfig = {
+      method: 'post',
+      url: loginUrl,
+      headers,
+      httpsAgent: proxy ? new HttpsProxyAgent(proxy) : null,
+    };
+    const loginResponse = await axios(axiosConfig);
+    const jwt = loginResponse.data.data?.jwt;
+    if (!jwt) return [false, null, null];
+    const checkInStatusUrl = `https://api.pharosnetwork.xyz/sign/status?address=${wallet.address}`;
+    const checkInHeaders = { ...headers, authorization: `Bearer ${jwt}` };
+    const checkInStatusResponse = await axios({
+      method: 'get',
+      url: checkInStatusUrl,
+      headers: checkInHeaders,
+      httpsAgent: proxy ? new HttpsProxyAgent(proxy) : null,
+    });
+    const statusData = checkInStatusResponse.data;
+    if (statusData.code === 0 && statusData.data) {
+      if (statusData.data.is_signed === false) return [true, 0, jwt]; // eligible now
+      if (statusData.data.next_sign_timestamp)
+        return [false, statusData.data.next_sign_timestamp, jwt];
+    }
+    return [false, null, jwt];
+  } catch {
+    return [false, null, null];
+  }
+}
+
+// --- Helper for ERC20 approval and balance ---
 const checkBalanceAndApproval = async (wallet, tokenAddress, amount, decimals, spender) => {
   try {
     const tokenContract = new ethers.Contract(tokenAddress, erc20Abi, wallet);
@@ -205,6 +301,94 @@ const checkBalanceAndApproval = async (wallet, tokenAddress, amount, decimals, s
   }
 };
 
+// --- Faucet claim ---
+const claimFaucet = async (wallet, proxy = null) => {
+  try {
+    logger.step(`Checking faucet eligibility for wallet: ${wallet.address}`);
+
+    const message = "pharos";
+    const signature = await wallet.signMessage(message);
+
+    const loginUrl = `https://api.pharosnetwork.xyz/user/login?address=${wallet.address}&signature=${signature}&invite_code=S6NGMzXSCDBxhnwo`;
+    const headers = {
+      accept: "application/json, text/plain, */*",
+      "accept-language": "en-US,en;q=0.8",
+      authorization: "Bearer null",
+      "sec-ch-ua": '"Chromium";v="136", "Brave";v="136", "Not.A/Brand";v="99"',
+      "sec-ch-ua-mobile": "?0",
+      "sec-ch-ua-platform": '"Windows"',
+      "sec-fetch-dest": "empty",
+      "sec-fetch-mode": "cors",
+      "sec-fetch-site": "same-site",
+      "sec-gpc": "1",
+      Referer: "https://testnet.pharosnetwork.xyz/",
+      "Referrer-Policy": "strict-origin-when-cross-origin",
+      "User-Agent": randomUseragent.getRandom(),
+    };
+
+    const axiosConfig = {
+      method: 'post',
+      url: loginUrl,
+      headers,
+      httpsAgent: proxy ? new HttpsProxyAgent(proxy) : null,
+    };
+
+    const loginResponse = await axios(axiosConfig);
+    const loginData = loginResponse.data;
+    const jwt = loginData.data?.jwt;
+    if (!jwt) {
+      logger.error('Failed to get JWT for faucet claim');
+      return false;
+    }
+
+    const statusUrl = `https://api.pharosnetwork.xyz/faucet/status?address=${wallet.address}`;
+    const statusHeaders = {
+      ...headers,
+      authorization: `Bearer ${jwt}`,
+    };
+
+    const statusResponse = await axios({
+      method: 'get',
+      url: statusUrl,
+      headers: statusHeaders,
+      httpsAgent: proxy ? new HttpsProxyAgent(proxy) : null,
+    });
+    const statusData = statusResponse.data;
+
+    if (statusData.code !== 0 || !statusData.data) {
+      logger.error(`Faucet status check failed: ${statusData.msg || 'Unknown error'}`);
+      return false;
+    }
+
+    if (!statusData.data.is_able_to_faucet) {
+      const nextAvailable = new Date(statusData.data.avaliable_timestamp * 1000).toLocaleString('en-US', { timeZone: 'Asia/Makassar' });
+      logger.warn(`Faucet not available until: ${nextAvailable}`);
+      return false;
+    }
+
+    const claimUrl = `https://api.pharosnetwork.xyz/faucet/daily?address=${wallet.address}`;
+    const claimResponse = await axios({
+      method: 'post',
+      url: claimUrl,
+      headers: statusHeaders,
+      httpsAgent: proxy ? new HttpsProxyAgent(proxy) : null,
+    });
+    const claimData = claimResponse.data;
+
+    if (claimData.code === 0) {
+      logger.success(`Faucet claimed successfully for ${wallet.address}`);
+      return true;
+    } else {
+      logger.error(`Faucet claim failed: ${claimData.msg || 'Unknown error'}`);
+      return false;
+    }
+  } catch (error) {
+    logger.error(`Faucet claim failed for ${wallet.address}: ${error.message}`);
+    return false;
+  }
+};
+
+// --- Get user info ---
 const getUserInfo = async (wallet, proxy = null, jwt) => {
   try {
     logger.user(`Fetching user info for wallet: ${wallet.address}`);
@@ -232,7 +416,6 @@ const getUserInfo = async (wallet, proxy = null, jwt) => {
       httpsAgent: proxy ? new HttpsProxyAgent(proxy) : null,
     };
 
-    logger.loading('Fetching user profile...');
     const response = await axios(axiosConfig);
     const data = response.data;
 
@@ -250,11 +433,106 @@ const getUserInfo = async (wallet, proxy = null, jwt) => {
   }
 };
 
+// --- PHRS transfer ---
+const transferPHRS = async (wallet, provider, index) => {
+  try {
+    const amount = 0.000001;
+    const randomWallet = ethers.Wallet.createRandom();
+    const toAddress = randomWallet.address;
+    logger.step(`Preparing PHRS transfer ${index + 1}: ${amount} PHRS to ${toAddress}`);
+
+    const balance = await provider.getBalance(wallet.address);
+    const required = ethers.parseEther(amount.toString());
+
+    if (balance < required) {
+      logger.warn(`Skipping transfer ${index + 1}: Insufficient PHRS balance: ${ethers.formatEther(balance)} < ${amount}`);
+      return;
+    }
+
+    const feeData = await provider.getFeeData();
+    const gasPrice = feeData.gasPrice || ethers.parseUnits('1', 'gwei');
+    const tx = await wallet.sendTransaction({
+      to: toAddress,
+      value: required,
+      gasLimit: 21000,
+      gasPrice,
+      maxFeePerGas: feeData.maxFeePerGas || undefined,
+      maxPriorityFeePerGas: feeData.maxPriorityFeePerGas || undefined,
+    });
+
+    const receipt = await tx.wait();
+    logger.success(`Transfer ${index + 1} completed: ${receipt.hash}`);
+    logger.step(`Explorer: https://testnet.pharosscan.xyz/tx/${receipt.hash}`);
+  } catch (error) {
+    logger.error(`Transfer ${index + 1} failed: ${error.message}`);
+    if (error.transaction) {
+      logger.error(`Transaction details: ${JSON.stringify(error.transaction, null, 2)}`);
+    }
+    if (error.receipt) {
+      logger.error(`Receipt: ${JSON.stringify(error.receipt, null, 2)}`);
+    }
+  }
+};
+
+// --- Wrap PHRS ---
+const wrapPHRS = async (wallet, provider, index) => {
+  try {
+    const minAmount = 0.001;
+    const maxAmount = 0.005;
+    const amount = minAmount + Math.random() * (maxAmount - minAmount);
+    const amountWei = ethers.parseEther(amount.toFixed(6).toString());
+    logger.step(`Preparing wrap PHRS ${index + 1}: ${amount.toFixed(6)} PHRS to WPHRS`);
+
+    const balance = await provider.getBalance(wallet.address);
+    if (balance < amountWei) {
+      logger.warn(`Skipping wrap ${index + 1}: Insufficient PHRS balance: ${ethers.formatEther(balance)} < ${amount.toFixed(6)}`);
+      return;
+    }
+
+    const wphrsContract = new ethers.Contract(tokens.WPHRS, erc20Abi, wallet);
+    let estimatedGas;
+    try {
+      estimatedGas = await wphrsContract.deposit.estimateGas({ value: amountWei });
+    } catch (error) {
+      logger.error(`Gas estimation failed for wrap ${index + 1}: ${error.message}`);
+      return;
+    }
+
+    const feeData = await provider.getFeeData();
+    const gasPrice = feeData.gasPrice || ethers.parseUnits('1', 'gwei');
+    let tx;
+    try {
+      tx = await wphrsContract.deposit({
+        value: amountWei,
+        gasLimit: Math.ceil(Number(estimatedGas) * 1.2),
+        gasPrice,
+        maxFeePerGas: feeData.maxFeePerGas || undefined,
+        maxPriorityFeePerGas: feeData.maxPriorityFeePerGas || undefined,
+      });
+    } catch (error) {
+      logger.error(`Failed to send wrap transaction ${index + 1}: ${error.message}`);
+      return;
+    }
+
+    const receipt = await tx.wait();
+    logger.success(`Wrap ${index + 1} completed: ${receipt.hash}`);
+    logger.step(`Explorer: https://testnet.pharosscan.xyz/tx/${receipt.hash}`);
+  } catch (error) {
+    logger.error(`Wrap ${index + 1} failed: ${error.message}`);
+    if (error.transaction) {
+      logger.error(`Transaction details: ${JSON.stringify(error.transaction, null, 2)}`);
+    }
+    if (error.receipt) {
+      logger.error(`Receipt: ${JSON.stringify(error.receipt, null, 2)}`);
+    }
+  }
+};
+
+// --- Perform Swap ---
 const getMulticallData = (pair, amount, walletAddress) => {
   try {
     const decimals = tokenDecimals[pair.from];
     const scaledAmount = ethers.parseUnits(amount.toString(), decimals);
-
     const data = ethers.AbiCoder.defaultAbiCoder().encode(
       ['address', 'address', 'uint256', 'address', 'uint256', 'uint256', 'uint256'],
       [
@@ -267,30 +545,12 @@ const getMulticallData = (pair, amount, walletAddress) => {
         0,
       ]
     );
-
     return [ethers.concat(['0x04e45aaf', data])];
   } catch (error) {
     logger.error(`Failed to generate multicall data: ${error.message}`);
     return [];
   }
 };
-
-async function withTimeout(promise, ms, description = "Operation") {
-  let timeoutId;
-  const timeout = new Promise((_, reject) => {
-    timeoutId = setTimeout(() => {
-      reject(new Error(`${description} timed out after ${ms / 1000}s`));
-    }, ms);
-  });
-
-  try {
-    return await Promise.race([promise, timeout]);
-  } finally {
-    clearTimeout(timeoutId);
-  }
-}
-
-const TX_TIMEOUT = 120 * 1000; // 120 seconds
 
 const performSwap = async (wallet, provider, index) => {
   try {
@@ -353,14 +613,7 @@ const performSwap = async (wallet, provider, index) => {
       return;
     }
 
-    logger.loading(`Swap transaction ${index + 1} sent, waiting for confirmation...`);
-    let receipt;
-    try {
-      receipt = await withTimeout(tx.wait(), TX_TIMEOUT, `Swap ${index + 1} confirmation`);
-    } catch (error) {
-      logger.error(`Swap ${index + 1} confirmation failed: ${error.message}. Skipping to next tx.`);
-      return;
-    }
+    const receipt = await tx.wait();
     logger.success(`Swap ${index + 1} completed: ${receipt.hash}`);
     logger.step(`Explorer: https://testnet.pharosscan.xyz/tx/${receipt.hash}`);
   } catch (error) {
@@ -374,113 +627,7 @@ const performSwap = async (wallet, provider, index) => {
   }
 };
 
-const transferPHRS = async (wallet, provider, index) => {
-  try {
-    const amount = 0.000001;
-    const randomWallet = ethers.Wallet.createRandom();
-    const toAddress = randomWallet.address;
-    logger.step(`Preparing PHRS transfer ${index + 1}: ${amount} PHRS to ${toAddress}`);
-
-    const balance = await provider.getBalance(wallet.address);
-    const required = ethers.parseEther(amount.toString());
-
-    if (balance < required) {
-      logger.warn(`Skipping transfer ${index + 1}: Insufficient PHRS balance: ${ethers.formatEther(balance)} < ${amount}`);
-      return;
-    }
-
-    const feeData = await provider.getFeeData();
-    const gasPrice = feeData.gasPrice || ethers.parseUnits('1', 'gwei');
-    const tx = await wallet.sendTransaction({
-      to: toAddress,
-      value: required,
-      gasLimit: 21000,
-      gasPrice,
-      maxFeePerGas: feeData.maxFeePerGas || undefined,
-      maxPriorityFeePerGas: feeData.maxPriorityFeePerGas || undefined,
-    });
-
-    logger.loading(`Transfer transaction ${index + 1} sent, waiting for confirmation...`);
-    let receipt;
-    try {
-      receipt = await withTimeout(tx.wait(), TX_TIMEOUT, `Transfer ${index + 1} confirmation`);
-    } catch (error) {
-      logger.error(`Transfer ${index + 1} confirmation failed: ${error.message}. Skipping to next tx.`);
-      return;
-    }
-    logger.success(`Transfer ${index + 1} completed: ${receipt.hash}`);
-    logger.step(`Explorer: https://testnet.pharosscan.xyz/tx/${receipt.hash}`);
-  } catch (error) {
-    logger.error(`Transfer ${index + 1} failed: ${error.message}`);
-    if (error.transaction) {
-      logger.error(`Transaction details: ${JSON.stringify(error.transaction, null, 2)}`);
-    }
-    if (error.receipt) {
-      logger.error(`Receipt: ${JSON.stringify(error.receipt, null, 2)}`);
-    }
-  }
-};
-
-const wrapPHRS = async (wallet, provider, index) => {
-  try {
-    const minAmount = 0.001;
-    const maxAmount = 0.005;
-    const amount = minAmount + Math.random() * (maxAmount - minAmount);
-    const amountWei = ethers.parseEther(amount.toFixed(6).toString());
-    logger.step(`Preparing wrap PHRS ${index + 1}: ${amount.toFixed(6)} PHRS to WPHRS`);
-
-    const balance = await provider.getBalance(wallet.address);
-    if (balance < amountWei) {
-      logger.warn(`Skipping wrap ${index + 1}: Insufficient PHRS balance: ${ethers.formatEther(balance)} < ${amount.toFixed(6)}`);
-      return;
-    }
-
-    const wphrsContract = new ethers.Contract(tokens.WPHRS, erc20Abi, wallet);
-    let estimatedGas;
-    try {
-      estimatedGas = await wphrsContract.deposit.estimateGas({ value: amountWei });
-    } catch (error) {
-      logger.error(`Gas estimation failed for wrap ${index + 1}: ${error.message}`);
-      return;
-    }
-
-    const feeData = await provider.getFeeData();
-    const gasPrice = feeData.gasPrice || ethers.parseUnits('1', 'gwei');
-    let tx;
-    try {
-      tx = await wphrsContract.deposit({
-        value: amountWei,
-        gasLimit: Math.ceil(Number(estimatedGas) * 1.2),
-        gasPrice,
-        maxFeePerGas: feeData.maxFeePerGas || undefined,
-        maxPriorityFeePerGas: feeData.maxPriorityFeePerGas || undefined,
-      });
-    } catch (error) {
-      logger.error(`Failed to send wrap transaction ${index + 1}: ${error.message}`);
-      return;
-    }
-
-    logger.loading(`Wrap transaction ${index + 1} sent, waiting for confirmation...`);
-    let receipt;
-    try {
-      receipt = await withTimeout(tx.wait(), TX_TIMEOUT, `Wrap ${index + 1} confirmation`);
-    } catch (error) {
-      logger.error(`Wrap ${index + 1} confirmation failed: ${error.message}. Skipping to next tx.`);
-      return;
-    }
-    logger.success(`Wrap ${index + 1} completed: ${receipt.hash}`);
-    logger.step(`Explorer: https://testnet.pharosscan.xyz/tx/${receipt.hash}`);
-  } catch (error) {
-    logger.error(`Wrap ${index + 1} failed: ${error.message}`);
-    if (error.transaction) {
-      logger.error(`Transaction details: ${JSON.stringify(error.transaction, null, 2)}`);
-    }
-    if (error.receipt) {
-      logger.error(`Receipt: ${JSON.stringify(error.receipt, null, 2)}`);
-    }
-  }
-};
-
+// --- Add Liquidity ---
 const addLiquidity = async (wallet, provider, index) => {
   try {
     const pair = lpOptions[Math.floor(Math.random() * lpOptions.length)];
@@ -546,14 +693,7 @@ const addLiquidity = async (wallet, provider, index) => {
       return;
     }
 
-    logger.loading(`Liquidity Add ${index + 1} sent, waiting for confirmation...`);
-    let receipt;
-    try {
-      receipt = await withTimeout(tx.wait(), TX_TIMEOUT, `LP ${index + 1} confirmation`);
-    } catch (error) {
-      logger.error(`LP ${index + 1} confirmation failed: ${error.message}. Skipping to next tx.`);
-      return;
-    }
+    const receipt = await tx.wait();
     logger.success(`Liquidity Add ${index + 1} completed: ${receipt.hash}`);
     logger.step(`Explorer: https://testnet.pharosscan.xyz/tx/${receipt.hash}`);
   } catch (error) {
@@ -566,241 +706,6 @@ const addLiquidity = async (wallet, provider, index) => {
     }
   }
 };
-
-const claimFaucet = async (wallet, proxy = null) => {
-  try {
-    logger.step(`Checking faucet eligibility for wallet: ${wallet.address}`);
-
-    const message = "pharos";
-    const signature = await wallet.signMessage(message);
-    logger.step(`Signed message: ${signature}`);
-
-    const loginUrl = `https://api.pharosnetwork.xyz/user/login?address=${wallet.address}&signature=${signature}&invite_code=S6NGMzXSCDBxhnwo`;
-    const headers = {
-      accept: "application/json, text/plain, */*",
-      "accept-language": "en-US,en;q=0.8",
-      authorization: "Bearer null",
-      "sec-ch-ua": '"Chromium";v="136", "Brave";v="136", "Not.A/Brand";v="99"',
-      "sec-ch-ua-mobile": "?0",
-      "sec-ch-ua-platform": '"Windows"',
-      "sec-fetch-dest": "empty",
-      "sec-fetch-mode": "cors",
-      "sec-fetch-site": "same-site",
-      "sec-gpc": "1",
-      Referer: "https://testnet.pharosnetwork.xyz/",
-      "Referrer-Policy": "strict-origin-when-cross-origin",
-      "User-Agent": randomUseragent.getRandom(),
-    };
-
-    const axiosConfig = {
-      method: 'post',
-      url: loginUrl,
-      headers,
-      httpsAgent: proxy ? new HttpsProxyAgent(proxy) : null,
-    };
-
-    logger.loading('Sending login request for faucet...');
-    const loginResponse = await axios(axiosConfig);
-    const loginData = loginResponse.data;
-
-    if (loginData.code !== 0 || !loginData.data.jwt) {
-      logger.error(`Login failed for faucet: ${loginData.msg || 'Unknown error'}`);
-      return false;
-    }
-
-    const jwt = loginData.data.jwt;
-    logger.success(`Login successful for faucet, JWT: ${jwt}`);
-
-    const statusUrl = `https://api.pharosnetwork.xyz/faucet/status?address=${wallet.address}`;
-    const statusHeaders = {
-      ...headers,
-      authorization: `Bearer ${jwt}`,
-    };
-
-    logger.loading('Checking faucet status...');
-    const statusResponse = await axios({
-      method: 'get',
-      url: statusUrl,
-      headers: statusHeaders,
-      httpsAgent: proxy ? new HttpsProxyAgent(proxy) : null,
-    });
-    const statusData = statusResponse.data;
-
-    if (statusData.code !== 0 || !statusData.data) {
-      logger.error(`Faucet status check failed: ${statusData.msg || 'Unknown error'}`);
-      return false;
-    }
-
-    if (!statusData.data.is_able_to_faucet) {
-      const nextAvailable = new Date(statusData.data.avaliable_timestamp * 1000).toLocaleString('en-US', { timeZone: 'Asia/Makassar' });
-      logger.warn(`Faucet not available until: ${nextAvailable}`);
-      return false;
-    }
-
-    const claimUrl = `https://api.pharosnetwork.xyz/faucet/daily?address=${wallet.address}`;
-    logger.loading('Claiming faucet...');
-    const claimResponse = await axios({
-      method: 'post',
-      url: claimUrl,
-      headers: statusHeaders,
-      httpsAgent: proxy ? new HttpsProxyAgent(proxy) : null,
-    });
-    const claimData = claimResponse.data;
-
-    if (claimData.code === 0) {
-      logger.success(`Faucet claimed successfully for ${wallet.address}`);
-      return true;
-    } else {
-      logger.error(`Faucet claim failed: ${claimData.msg || 'Unknown error'}`);
-      return false;
-    }
-  } catch (error) {
-    logger.error(`Faucet claim failed for ${wallet.address}: ${error.message}`);
-    return false;
-  }
-};
-
-const performCheckIn = async (wallet, proxy = null) => {
-  try {
-    logger.step(`Performing daily check-in for wallet: ${wallet.address}`);
-
-    const message = "pharos";
-    const signature = await wallet.signMessage(message);
-    logger.step(`Signed message: ${signature}`);
-
-    const loginUrl = `https://api.pharosnetwork.xyz/user/login?address=${wallet.address}&signature=${signature}&invite_code=S6NGMzXSCDBxhnwo`;
-    const headers = {
-      accept: "application/json, text/plain, */*",
-      "accept-language": "en-US,en;q=0.8",
-      authorization: "Bearer null",
-      "sec-ch-ua": '"Chromium";v="136", "Brave";v="136", "Not.A/Brand";v="99"',
-      "sec-ch-ua-mobile": "?0",
-      "sec-ch-ua-platform": '"Windows"',
-      "sec-fetch-dest": "empty",
-      "sec-fetch-mode": "cors",
-      "sec-fetch-site": "same-site",
-      "sec-gpc": "1",
-      Referer: "https://testnet.pharosnetwork.xyz/",
-      "Referrer-Policy": "strict-origin-when-cross-origin",
-      "User-Agent": randomUseragent.getRandom(),
-    };
-
-    const axiosConfig = {
-      method: 'post',
-      url: loginUrl,
-      headers,
-      httpsAgent: proxy ? new HttpsProxyAgent(proxy) : null,
-    };
-
-    logger.loading('Sending login request...');
-    const loginResponse = await axios(axiosConfig);
-    const loginData = loginResponse.data;
-
-    if (loginData.code !== 0 || !loginData.data.jwt) {
-      logger.error(`Login failed: ${loginData.msg || 'Unknown error'}`);
-      return null;
-    }
-
-    const jwt = loginData.data.jwt;
-    logger.success(`Login successful, JWT: ${jwt}`);
-
-    const checkInStatusUrl = `https://api.pharosnetwork.xyz/sign/status?address=${wallet.address}`;
-    const checkInHeaders = {
-      ...headers,
-      authorization: `Bearer ${jwt}`,
-    };
-
-    logger.loading('Checking check-in status...');
-    const checkInStatusResponse = await axios({
-      method: 'get',
-      url: checkInStatusUrl,
-      headers: checkInHeaders,
-      httpsAgent: proxy ? new HttpsProxyAgent(proxy) : null,
-    });
-    const statusData = checkInStatusResponse.data;
-
-    if (statusData.code === 0 && statusData.data && statusData.data.is_signed === false) {
-      // Not signed yet, perform check-in
-      const checkInUrl = `https://api.pharosnetwork.xyz/sign/in?address=${wallet.address}`;
-      logger.loading('Sending check-in request...');
-      const checkInResponse = await axios({
-        method: 'post',
-        url: checkInUrl,
-        headers: checkInHeaders,
-        httpsAgent: proxy ? new HttpsProxyAgent(proxy) : null,
-      });
-      const checkInData = checkInResponse.data;
-      if (checkInData.code === 0) {
-        logger.success(`Check-in successful for ${wallet.address}`);
-        return jwt;
-      } else {
-        logger.warn(`Check-in failed, possibly already checked in: ${checkInData.msg || 'Unknown error'}`);
-        return null;
-      }
-    } else if (statusData.code === 0 && statusData.data && statusData.data.next_sign_timestamp) {
-      const now = Math.floor(Date.now() / 1000);
-      const timeLeft = statusData.data.next_sign_timestamp - now;
-      const nextTimeStr = new Date(statusData.data.next_sign_timestamp * 1000).toLocaleString();
-      logger.warn(`Check-in not available. Next at ${nextTimeStr} (${msToTime(timeLeft * 1000)} left)`);
-      return null;
-    } else {
-      logger.warn('Check-in status unknown or already signed.');
-      return null;
-    }
-  } catch (error) {
-    logger.error(`Check-in failed for ${wallet.address}: ${error.message}`);
-    return null;
-  }
-};
-
-function msToTime(ms) {
-  if (ms <= 0) return "now";
-  let seconds = Math.floor(ms / 1000);
-  let h = Math.floor(seconds / 3600);
-  let m = Math.floor((seconds % 3600) / 60);
-  let s = seconds % 60;
-  return `${h}h ${m}m ${s}s`;
-}
-
-function shuffleArray(arr) {
-  let a = arr.slice();
-  for (let i = a.length - 1; i > 0; i--) {
-    let j = Math.floor(Math.random() * (i + 1));
-    [a[i], a[j]] = [a[j], a[i]];
-  }
-  return a;
-}
-
-const PROGRESS_FILE = 'progress.json';
-
-const saveProgress = (progress) => {
-  try {
-    fs.writeFileSync(PROGRESS_FILE, JSON.stringify(progress, null, 2));
-  } catch (err) {
-    logger.warn('Could not save progress file: ' + err.message);
-  }
-};
-
-const loadProgress = () => {
-  try {
-    if (fs.existsSync(PROGRESS_FILE)) {
-      return JSON.parse(fs.readFileSync(PROGRESS_FILE, 'utf8'));
-    }
-    return {};
-  } catch (err) {
-    logger.warn('Could not read progress file: ' + err.message);
-    return {};
-  }
-};
-
-const numTransfers = 10;
-const numWraps = 10;
-const numSwaps = 10;
-const numLPs = 10;
-const WAIT_LOG_INTERVAL = 60 * 10;
-
-const sleep = ms => new Promise(res => setTimeout(res, ms));
-const getNowUTC = () => Math.floor(Date.now() / 1000);
 
 // ================= MAIN LOOP ==================
 const main = async () => {
@@ -816,16 +721,15 @@ const main = async () => {
   }
 
   let progress = loadProgress();
-  let lastCheckinTimes = progress.lastCheckinTimes || {};
 
   while (true) {
     const shuffledKeyEntries = shuffleArray(privateKeyEntries);
-    const thisRunCheckin = {};
+    let walletNextCheckinTimestamps = {};
+    let anyWalletProcessed = false;
 
     for (let idx = 0; idx < shuffledKeyEntries.length; idx++) {
       const [key, privateKey] = shuffledKeyEntries[idx];
       const walletNumber = key.match(/\d+/)?.[0] || (idx + 1);
-
       const proxy = proxies.length ? getRandomProxy(proxies) : null;
       const provider = setupProvider(proxy);
       const wallet = new ethers.Wallet(privateKey, provider);
@@ -845,23 +749,26 @@ const main = async () => {
       }
       let wprog = progress.wallets[wallet.address];
 
-      // ========== [CHECK-IN FIRST LOGIC] ==========
-      const checkinStart = getNowUTC();
-      let jwt = null;
-      let checkinSuccess = false;
+      // --- Check available/next check-in ---
       logger.step('Checking if daily check-in is available...');
-      jwt = await performCheckIn(wallet, proxy);
+      let [eligible, nextTs, jwt] = await checkinStatus(wallet, proxy);
 
-      if (jwt) {
+      if (eligible && jwt) {
         wprog.checkedIn = true;
         saveProgress(progress);
-        checkinSuccess = true;
-        thisRunCheckin[wallet.address] = checkinStart;
+        anyWalletProcessed = true;
         logger.success('Check-in available and performed successfully. Proceeding with other actions...');
+        walletNextCheckinTimestamps[wallet.address] = Math.floor(Date.now()/1000) + 86400;
       } else {
+        // If not eligible, log and record next eligible timestamp
+        if (nextTs && nextTs > Math.floor(Date.now()/1000)) {
+          walletNextCheckinTimestamps[wallet.address] = nextTs;
+          logger.warn(`Check-in not available. Next at ${new Date(nextTs * 1000).toLocaleString()} (${msToTime((nextTs - Math.floor(Date.now()/1000)) * 1000)} left)`);
+        } else {
+          walletNextCheckinTimestamps[wallet.address] = Math.floor(Date.now()/1000) + 86400;
+        }
         wprog.checkedIn = false;
         saveProgress(progress);
-        thisRunCheckin[wallet.address] = lastCheckinTimes[wallet.address] || checkinStart;
         logger.warn('Check-in NOT available, skipping all other actions for this wallet.');
         continue;
       }
@@ -876,10 +783,6 @@ const main = async () => {
         logger.info('Faucet already claimed for this cycle.');
       }
 
-      // TRANSFERS
-      console.log(`\n${colors.cyan}------------------------${colors.reset}`);
-      console.log(`${colors.cyan}TRANSFERS${colors.reset}`);
-      console.log(`${colors.cyan}------------------------${colors.reset}`);
       for (let i = wprog.transfers; i < numTransfers; i++) {
         await transferPHRS(wallet, provider, i);
         wprog.transfers = i + 1;
@@ -887,10 +790,6 @@ const main = async () => {
         await sleep(Math.random() * 2000 + 1000);
       }
 
-      // WRAP
-      console.log(`\n${colors.cyan}------------------------${colors.reset}`);
-      console.log(`${colors.cyan}WRAP${colors.reset}`);
-      console.log(`${colors.cyan}------------------------${colors.reset}`);
       for (let i = wprog.wraps; i < numWraps; i++) {
         await wrapPHRS(wallet, provider, i);
         wprog.wraps = i + 1;
@@ -898,10 +797,6 @@ const main = async () => {
         await sleep(Math.random() * 2000 + 1000);
       }
 
-      // SWAP
-      console.log(`\n${colors.cyan}------------------------${colors.reset}`);
-      console.log(`${colors.cyan}SWAP${colors.reset}`);
-      console.log(`${colors.cyan}------------------------${colors.reset}`);
       for (let i = wprog.swaps; i < numSwaps; i++) {
         await performSwap(wallet, provider, i);
         wprog.swaps = i + 1;
@@ -909,10 +804,6 @@ const main = async () => {
         await sleep(Math.random() * 2000 + 1000);
       }
 
-      // ADD LP
-      console.log(`\n${colors.cyan}------------------------${colors.reset}`);
-      console.log(`${colors.cyan}ADD LP${colors.reset}`);
-      console.log(`${colors.cyan}------------------------${colors.reset}`);
       for (let i = wprog.lps; i < numLPs; i++) {
         await addLiquidity(wallet, provider, i);
         wprog.lps = i + 1;
@@ -930,29 +821,26 @@ const main = async () => {
       saveProgress(progress);
     }
 
-    lastCheckinTimes = { ...thisRunCheckin };
-    progress.lastCheckinTimes = lastCheckinTimes;
-    saveProgress(progress);
-
-    logger.success('All actions completed for all wallets!');
-
-    const now = getNowUTC();
-    const nextCheckinTimestamps = Object.values(lastCheckinTimes).map(ts => ts + 86400);
-    const nextCheckinTime = Math.min(...nextCheckinTimestamps);
-
-    if (nextCheckinTime > now) {
-      let waitSeconds = nextCheckinTime - now;
-      logger.info(`Waiting for next check-in window. Time remaining: ${(waitSeconds/3600).toFixed(2)} hours (${waitSeconds}s)`);
-      while (waitSeconds > 0) {
-        let logInterval = Math.min(WAIT_LOG_INTERVAL, waitSeconds);
+    // --- Wait until soonest next eligibility ---
+    const now = Math.floor(Date.now() / 1000);
+    const nextTimes = Object.values(walletNextCheckinTimestamps)
+      .filter(ts => typeof ts === 'number' && ts > now);
+    if (nextTimes.length > 0) {
+      const soonest = Math.min(...nextTimes);
+      const waitFor = Math.max(soonest - now, 60);
+      logger.info(`No wallets eligible. Waiting ${msToTime(waitFor * 1000)} until next eligibility check...`);
+      let waitLeft = waitFor;
+      while (waitLeft > 0) {
+        let logInterval = Math.min(WAIT_LOG_INTERVAL, waitLeft);
         await sleep(logInterval * 1000);
-        waitSeconds -= logInterval;
-        if (waitSeconds > 0) {
-          logger.info(`...still waiting for next check-in window. Time left: ${(waitSeconds/3600).toFixed(2)} hours`);
+        waitLeft -= logInterval;
+        if (waitLeft > 0) {
+          logger.info(`...still waiting. Time left: ${msToTime(waitLeft * 1000)}`);
         }
       }
     } else {
-      logger.info('Next check-in time reached, starting tasks immediately.');
+      logger.info('No check-in info found for any wallet. Waiting 10 minutes...');
+      await sleep(10 * 60 * 1000);
     }
   }
 };
