@@ -2,6 +2,10 @@
 
 # INSTALL 
 ```bash
+npm install axios ethers readline dotenv
+```
+
+```bash
 npm install ethers https-proxy-agent random-useragent pm2
 ```
 ```bash
