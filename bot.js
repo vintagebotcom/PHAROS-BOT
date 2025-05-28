@@ -605,6 +605,14 @@ const claimFaucet = async (wallet, proxy = null) => {
   }
 };
 
+// Hardcode the delay to 24 hours (1440 minutes)
+const getUserDelay = () => {
+  const minutes = 1440; // 24 hours
+  logger.info('Delay between cycles hardcoded to 1440 minutes (24 hours)');
+  return minutes;
+};
+
+// Only proceed if JWT is returned AND daily check-in is available
 const performCheckIn = async (wallet, proxy = null) => {
   try {
     logger.step(`Performing daily check-in for wallet: ${wallet.address}`);
@@ -643,12 +651,13 @@ const performCheckIn = async (wallet, proxy = null) => {
 
     if (loginData.code !== 0 || !loginData.data.jwt) {
       logger.error(`Login failed: ${loginData.msg || 'Unknown error'}`);
-      return null;
+      return null; // SKIP WALLET
     }
 
     const jwt = loginData.data.jwt;
     logger.success(`Login successful, JWT: ${jwt}`);
 
+    // Now check for daily check-in
     const checkInUrl = `https://api.pharosnetwork.xyz/sign/in?address=${wallet.address}`;
     const checkInHeaders = {
       ...headers,
@@ -666,14 +675,14 @@ const performCheckIn = async (wallet, proxy = null) => {
 
     if (checkInData.code === 0) {
       logger.success(`Check-in successful for ${wallet.address}`);
-      return jwt;
+      return jwt; // proceed with actions
     } else {
-      logger.warn(`Check-in failed, possibly already checked in: ${checkInData.msg || 'Unknown error'}`);
-      return jwt;
+      logger.warn(`Check-in not available for this wallet (possibly already checked in or not available): ${checkInData.msg || 'Unknown error'}`);
+      return null; // SKIP WALLET
     }
   } catch (error) {
     logger.error(`Check-in failed for ${wallet.address}: ${error.message}`);
-    return null;
+    return null; // SKIP WALLET
   }
 };
 
@@ -753,13 +762,6 @@ const addLiquidity = async (wallet, provider, index, jwt, proxy) => {
   }
 };
 
-// Hardcode the delay to 24 hours (1440 minutes)
-const getUserDelay = () => {
-  const minutes = 1440; // 24 hours
-  logger.info('Delay between cycles hardcoded to 1440 minutes (24 hours)');
-  return minutes;
-};
-
 const countdown = async (minutes) => {
   const totalSeconds = minutes * 60;
   logger.info(`Starting ${minutes}-minute countdown...`);
@@ -801,6 +803,7 @@ const main = async () => {
 
       await claimFaucet(wallet, proxy);
 
+      // Only proceed if JWT is returned AND daily check-in is available
       const jwt = await performCheckIn(wallet, proxy);
       if (jwt) {
         await getUserInfo(wallet, proxy, jwt);
@@ -838,7 +841,7 @@ const main = async () => {
         }
         logger.success('All actions completed for this wallet!');
       } else {
-        logger.error('Check-in failed. Skipping all actions for this wallet and moving to the next wallet.');
+        logger.error('Check-in unavailable or failed. Skipping all actions for this wallet and moving to the next wallet.');
         continue; // Skip to next wallet
       }
     }
