@@ -775,6 +775,22 @@ const countdown = async (minutes) => {
   process.stdout.write('\rCountdown complete! Restarting process...\n');
 };
 
+// Dynamically load all PRIVATE_KEY_* from .env (any number of wallets)
+const getAllPrivateKeys = () => {
+  const privateKeys = [];
+  for (const k in process.env) {
+    if (/^PRIVATE_KEY_\d+$/.test(k) && process.env[k]) {
+      privateKeys.push(process.env[k]);
+    }
+  }
+  if (privateKeys.length === 0) {
+    logger.error('No private keys found in .env');
+  } else {
+    logger.info(`Loaded ${privateKeys.length} private keys from .env`);
+  }
+  return privateKeys;
+};
+
 const main = async () => {
   logger.banner();
 
@@ -782,9 +798,8 @@ const main = async () => {
   logger.info(`Delay between cycles set to ${delayMinutes} minutes`);
 
   const proxies = loadProxies();
-  const privateKeys = [process.env.PRIVATE_KEY_1, process.env.PRIVATE_KEY_2].filter(pk => pk);
+  const privateKeys = getAllPrivateKeys();
   if (!privateKeys.length) {
-    logger.error('No private keys found in .env');
     return;
   }
 
